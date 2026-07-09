@@ -27,8 +27,7 @@
     yaml_mark_t (24 bytes): index 0 line 8 column 16
 
   yaml_parser_t: 480 bytes (allocated on the heap, freed with yaml_parser_delete)."
-  (:require [jolt.ffi :as ffi]
-            [clojure.core :refer [defn def-]]))
+  (:require [jolt.ffi :as ffi]))
 
 ;; Re-export jolt.ffi helpers so consumers only need one :require.
 (def alloc ffi/alloc)
@@ -159,7 +158,7 @@
 (defn event-start-mark
   "Read start mark as {:index :line :column}."
   [event]
-  (let [base (+ EVENT-START-MARK)]
+  (let [base EVENT-START-MARK]
     {:index  (ffi/read event :size_t (+ base MARK-INDEX))
      :line   (ffi/read event :size_t (+ base MARK-LINE))
      :column (ffi/read event :size_t (+ base MARK-COLUMN))}))
@@ -167,7 +166,7 @@
 (defn event-end-mark
   "Read end mark as {:index :line :column}."
   [event]
-  (let [base (+ EVENT-END-MARK)]
+  (let [base EVENT-END-MARK]
     {:index  (ffi/read event :size_t (+ base MARK-INDEX))
      :line   (ffi/read event :size_t (+ base MARK-LINE))
      :column (ffi/read event :size_t (+ base MARK-COLUMN))}))
@@ -273,19 +272,3 @@
    :tag      (collection-tag event)
    :implicit (collection-implicit event)
    :style    (collection-style event)})
-
-;; --- event pump --------------------------------------------------------------
-
-(defn pump-events
-  "Given a parser and an initialized event, yields a lazy seq of event-type integers
-  (terminated by STREAM-END). Each event must be freed with free-event after reading;
-  this is a building block — the higher-level API manages the lifecycle."
-  [parser event]
-  (when (parse-next parser event)
-    (let [t (event-type event)]
-      (when-not (and (= t YAML-NO-EVENT) (nil? (parse-next parser event)))
-        (if (= t YAML-NO-EVENT)
-          (recur parser event)
-          (lazy-seq
-           (cons t
-                 (fn [] (pump-events parser event)))))))))
