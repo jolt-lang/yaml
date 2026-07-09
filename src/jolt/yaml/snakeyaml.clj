@@ -71,12 +71,12 @@
                      :class (fqn EVT "ScalarEvent"))
               (tput! :value (:value sv))
               (tput! :style (case (:style sv)
-                              1 "|"     ;; YAML-PLAIN-SCALAR-STYLE
-                              2 "'"     ;; YAML-SINGLE-QUOTED-SCALAR-STYLE
-                              3 "\""    ;; YAML-DOUBLE-QUOTED-SCALAR-STYLE
-                              4 "|"     ;; YAML-LITERAL-SCALAR-STYLE
-                              5 ">"     ;; YAML-FOLDED-SCALAR-STYLE
-                              "|"))
+                               1 ":"     ;; YAML-PLAIN-SCALAR-STYLE (observed)
+                               2 "'"     ;; YAML-SINGLE-QUOTED-SCALAR-STYLE
+                               3 "\""    ;; YAML-DOUBLE-QUOTED-SCALAR-STYLE
+                               4 "|"     ;; YAML-LITERAL-SCALAR-STYLE
+                               5 ">"     ;; YAML-FOLDED-SCALAR-STYLE
+                               ":"))
               (tput! :anchor (some-> (:anchor sv) java.util.Optional/of))
               (tput! :tag (some-> (:tag sv) java.util.Optional/of))
               (tput! :start-mark (parse-mark event ffi/EVENT-START-MARK))
