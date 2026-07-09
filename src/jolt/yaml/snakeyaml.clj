@@ -138,99 +138,138 @@
 
 ;; --- event pump: libyaml -> SnakeYAML event seq ------------------------------
 
+(defn- make-parser [s]
+  (let [parser (ffi/create-parser)
+        bytes  (.getBytes s "UTF-8")
+        n      (alength bytes)
+        buf    (ffi/alloc (max 1 n))]
+    (ffi/write-array buf bytes)
+    (ffi/set-input-string parser buf n)
+    (volatile! {:parser parser :buf buf})))
+
+(defn- destroy-parser! [vstate]
+  (let [state @vstate]
+    (when-let [p (:parser state)]
+      (ffi/destroy-parser p)
+      (when-let [b (:buf state)]
+        (ffi/free b))
+      (vreset! vstate {:parser nil :buf nil}))))
+
+(defn- read-event [vstate]
+  "Read the next non-stream event. Returns the event obj or nil at EOF.
+   Destroys parser+buf on STREAM-END or parse failure."
+  (let [parser (:parser @vstate)]
+    (when-not (ffi/null? parser)
+      (let [evt (ffi/alloc-event)]
+        (if (ffi/parse-next parser evt)
+          (let [t (ffi/event-type evt)]
+            (if (= t ffi/YAML-STREAM-END-EVENT)
+              ;; STREAM-END — clean up and return nil
+              (do (ffi/free-event evt)
+                  (destroy-parser! vstate)
+                  nil)
+              (if (= t ffi/YAML-STREAM-START-EVENT)
+                ;; STREAM-START — skip
+                (do (ffi/free-event evt)
+                    (recur vstate))
+                ;; Real event — build the tagged-table obj
+                (let [obj (case t
+                            3 (build-document-start evt)
+                            4 (build-document-end evt)
+                            5 (build-alias evt)
+                            6 (build-scalar evt)
+                            7 (build-sequence-start evt)
+                            8 (build-sequence-end evt)
+                            9 (build-mapping-start evt)
+                            10 (build-mapping-end evt)
+                            nil)]
+                  (ffi/free-event evt)
+                  obj))))
+          (do (ffi/free-event evt)
+              (destroy-parser! vstate)
+              nil))))))
+
 (defn parse-string
   "Parse YAML string into a lazy seq of SnakeYAML event objects."
   [^String s]
-  (let [parser (ffi/create-parser)
-        bytes (.getBytes s "UTF-8")
-        n     (alength bytes)
-        buf   (ffi/alloc (max 1 n))]
-    (ffi/write-array buf bytes)
-    (ffi/set-input-string parser buf n)
+  (let [vstate (make-parser s)]
     (letfn [(pump []
-              (let [evt (ffi/alloc-event)]
-                (if (ffi/parse-next parser evt)
-                  (let [t (ffi/event-type evt)]
-                    ;; Skip STREAM-START (1) and STREAM-END (2) — libyaml emits
-                    ;; these but SnakeYAML's Parse.parseString does not, and
-                    ;; STREAM-END signals that the next parse returns false,
-                    ;; where we clean up parser+buf.
-                    (if (or (= t 1) (= t 2))
-                      (do (ffi/free-event evt) (pump))
-                      (let [obj (case t
-                                  3 (build-document-start evt)
-                                  4 (build-document-end evt)
-                                  5 (build-alias evt)
-                                  6 (build-scalar evt)
-                                  7 (build-sequence-start evt)
-                                  8 (build-sequence-end evt)
-                                  9 (build-mapping-start evt)
-                                  10 (build-mapping-end evt)
-                                  nil)]
-                        (ffi/free-event evt)
-                        (when obj
-                          (lazy-seq (cons obj (pump)))))))
-                  ;; End of stream — clean up
-                  (do (ffi/free-event evt)
-                      (ffi/destroy-parser parser)
-                      (ffi/free buf)
-                      nil))))]
+              (lazy-seq
+                (when-let [obj (read-event vstate)]
+                  (cons obj (pump)))))]
       (pump))))
 
 ;; --- class hierarchy registration --------------------------------------------
 
 (defn- register-event-methods! []
-  ;; Mark
-  (__register-class-methods! :jolt.snakeyaml/Mark
-    {"getLine"   (fn [self] (tget self :line))
-     "getColumn" (fn [self] (tget self :column))
-     "getIndex"  (fn [self] (tget self :index))})
+  ;; Register each method under BOTH keyword tag (runtime dispatch via tag)
+  ;; and FQN string (dispatch via imported-class type hint like ^NodeEvent).
+  (let [reg!    (fn [id ms] (__register-class-methods! id ms))
+        mark-fn   (fn [self] (if-let [m (tget self :start-mark)]
+                               (java.util.Optional/of m)
+                               java.util.Optional/empty))
+        end-fn    (fn [self] (if-let [m (tget self :end-mark)]
+                               (java.util.Optional/of m)
+                               java.util.Optional/empty))
+        anchor-fn (fn [self]
+                     (let [a (tget self :anchor)]
+                       (if a a (java.util.Optional/empty))))
+        tag-fn    (fn [self]
+                     (let [t (tget self :tag)]
+                       (if t t (java.util.Optional/empty))))
+        flow-fn   (fn [self] (tget self :flow))]
 
-  ;; getStartMark / getEndMark on every event type
-  (doseq [event-tag [:jolt.snakeyaml/ScalarEvent
-                     :jolt.snakeyaml/AliasEvent
-                     :jolt.snakeyaml/SequenceStartEvent
-                     :jolt.snakeyaml/MappingStartEvent
-                     :jolt.snakeyaml/SequenceEndEvent
-                     :jolt.snakeyaml/MappingEndEvent
-                     :jolt.snakeyaml/DocumentStartEvent
-                     :jolt.snakeyaml/DocumentEndEvent]]
-    (__register-class-methods! event-tag
-      {"getStartMark" (fn [self] (if-let [m (tget self :start-mark)]
-                                   (java.util.Optional/of m)
-                                   (java.util.Optional/empty)))
-       "getEndMark"   (fn [self] (if-let [m (tget self :end-mark)]
-                                   (java.util.Optional/of m)
-                                   (java.util.Optional/empty)))}))
+    ;; Mark (keyword for tag dispatch, FQN for ^Mark type hint)
+    (reg! :jolt.snakeyaml/Mark
+      {"getLine"   (fn [self] (tget self :line))
+       "getColumn" (fn [self] (tget self :column))
+       "getIndex"  (fn [self] (tget self :index))})
+    (reg! (fqn EXC "Mark")
+      {"getLine"   (fn [self] (tget self :line))
+       "getColumn" (fn [self] (tget self :column))
+       "getIndex"  (fn [self] (tget self :index))})
 
-  ;; getAnchor on node events (only on concrete subtypes, not on NodeEvent parent)
-  (doseq [node-tag [:jolt.snakeyaml/ScalarEvent
-                     :jolt.snakeyaml/AliasEvent
-                     :jolt.snakeyaml/SequenceStartEvent
-                     :jolt.snakeyaml/MappingStartEvent]]
-    (__register-class-methods! node-tag
-      {"getAnchor" (fn [self] (or (tget self :anchor) (java.util.Optional/empty)))}))
+    ;; ── Event — ^Event type hint ──
+    (reg! (fqn EVT "Event") {"getStartMark" mark-fn "getEndMark" end-fn})
 
-  ;; ScalarEvent specifics
-  (__register-class-methods! :jolt.snakeyaml/ScalarEvent
-    {"getValue"       (fn [self] (tget self :value))
-     "getTag"         (fn [self] (or (tget self :tag) (java.util.Optional/empty)))
-     "getScalarStyle" (fn [self]
-                        (let [s (tget self :style)]
-                          ;; Return a simple object with toString matching SnakeYAML's ScalarStyle
-                          (reify Object
-                            (toString [_] s))))})
+    ;; ── Every concrete event: getStartMark/getEndMark + getAnchor + getTag + isFlow ──
+    ;;    (instance? with Vars is broken (#39), so ALL events reach the tag/anchor
+    ;;     code paths in yamlscript.parser/event-start.)
+    (let [base-ms {"getStartMark" mark-fn "getEndMark" end-fn
+                   "getAnchor" anchor-fn "getTag" tag-fn
+                   "isFlow" flow-fn}]
+      (doseq [[kw nm] [[:jolt.snakeyaml/ScalarEvent "ScalarEvent"]
+                        [:jolt.snakeyaml/AliasEvent "AliasEvent"]
+                        [:jolt.snakeyaml/SequenceStartEvent "SequenceStartEvent"]
+                        [:jolt.snakeyaml/MappingStartEvent "MappingStartEvent"]
+                        [:jolt.snakeyaml/SequenceEndEvent "SequenceEndEvent"]
+                        [:jolt.snakeyaml/MappingEndEvent "MappingEndEvent"]
+                        [:jolt.snakeyaml/DocumentStartEvent "DocumentStartEvent"]
+                        [:jolt.snakeyaml/DocumentEndEvent "DocumentEndEvent"]]]
+        (reg! kw  base-ms)
+        (reg! (fqn EVT nm) base-ms)))
 
-  ;; AliasEvent specifics
-  (__register-class-methods! :jolt.snakeyaml/AliasEvent
-    {"getAlias" (fn [self] (tget self :alias))})
+    ;; ── ScalarEvent ──
+    (let [ms {"getValue"       (fn [self] (tget self :value))
+              "getTag"         tag-fn
+              "getScalarStyle" (fn [self]
+                                 (let [s (tget self :style)]
+                                   (reify Object (toString [_] s))))}]
+      (reg! :jolt.snakeyaml/ScalarEvent ms)
+      (reg! (fqn EVT "ScalarEvent") ms))
 
-  ;; getTag / isFlow on collection-start events (one registration per concrete class)
-  (doseq [coll-tag [:jolt.snakeyaml/SequenceStartEvent
-                    :jolt.snakeyaml/MappingStartEvent]]
-    (__register-class-methods! coll-tag
-      {"getTag" (fn [self] (or (tget self :tag) (java.util.Optional/empty)))
-       "isFlow" (fn [self] (tget self :flow))}))
+    ;; ── AliasEvent ──
+    (let [ms {"getAlias" (fn [self] (tget self :alias))}]
+      (reg! :jolt.snakeyaml/AliasEvent ms)
+      (reg! (fqn EVT "AliasEvent") ms))
+
+    ;; ── CollectionStartEvent — ^CollectionStartEvent type hint ──
+    (let [ms {"getTag" tag-fn "isFlow" flow-fn}]
+      (reg! (fqn EVT "CollectionStartEvent") ms)
+      (doseq [[kw nm] [[:jolt.snakeyaml/SequenceStartEvent "SequenceStartEvent"]
+                        [:jolt.snakeyaml/MappingStartEvent "MappingStartEvent"]]]
+        (reg! kw  ms)
+        (reg! (fqn EVT nm) ms))))
   nil)
 
 (defn- register-hierarchy! []
