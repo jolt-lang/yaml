@@ -1,0 +1,13 @@
+{:paths ["src"]
+
+ ;; libyaml backs the event-driven YAML parser. Declared :jolt/native so jolt
+ ;; loads it before this namespace, where the foreign-fn bindings resolve at load.
+ ;; Present on macOS via Homebrew / opt/homebrew and ubiquitous on Linux.
+ :jolt/native [{:name "yaml"
+                :darwin ["libyaml.dylib" "/opt/homebrew/opt/libyaml/lib/libyaml.dylib"]
+                :linux  ["libyaml-0.so.2" "libyaml.so"]}]
+
+ :aliases {:test {:extra-paths ["test"]
+                  :main-opts ["-m" "jolt.yaml-test"]}}
+
+ :tasks {test "joltc -M:test"}}
