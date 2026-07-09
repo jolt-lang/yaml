@@ -11,7 +11,8 @@
   (host/chez/java/host-static-classes.ss) — .of, .empty, .orElse, .get all work
   on jolt values directly."
   (:require [jolt.yaml.ffi :as ffi]
-            [jolt.yaml :as yaml]))
+            [jolt.yaml :as yaml]
+            [clojure.string :as str]))
 
 ;; --- hierarchy FQNs ----------------------------------------------------------
 
@@ -185,7 +186,7 @@
      "getColumn" (fn [self] (tget self :column))
      "getIndex"  (fn [self] (tget self :index))})
 
-  ;; Event base — getStartMark / getEndMark on every event type, wrapped in Optional
+  ;; getStartMark / getEndMark on every event type
   (doseq [event-tag [:jolt.snakeyaml/ScalarEvent
                      :jolt.snakeyaml/AliasEvent
                      :jolt.snakeyaml/SequenceStartEvent
@@ -197,23 +198,23 @@
     (__register-class-methods! event-tag
       {"getStartMark" (fn [self] (if-let [m (tget self :start-mark)]
                                    (java.util.Optional/of m)
-                                   java.util.Optional/empty))
+                                   (java.util.Optional/empty)))
        "getEndMark"   (fn [self] (if-let [m (tget self :end-mark)]
                                    (java.util.Optional/of m)
-                                   java.util.Optional/empty))}))
+                                   (java.util.Optional/empty)))}))
 
-  ;; NodeEvent — getAnchor
+  ;; getAnchor on node events (only on concrete subtypes, not on NodeEvent parent)
   (doseq [node-tag [:jolt.snakeyaml/ScalarEvent
-                    :jolt.snakeyaml/AliasEvent
-                    :jolt.snakeyaml/SequenceStartEvent
-                    :jolt.snakeyaml/MappingStartEvent]]
+                     :jolt.snakeyaml/AliasEvent
+                     :jolt.snakeyaml/SequenceStartEvent
+                     :jolt.snakeyaml/MappingStartEvent]]
     (__register-class-methods! node-tag
-      {"getAnchor" (fn [self] (or (tget self :anchor) java.util.Optional/empty))}))
+      {"getAnchor" (fn [self] (or (tget self :anchor) (java.util.Optional/empty)))}))
 
   ;; ScalarEvent specifics
   (__register-class-methods! :jolt.snakeyaml/ScalarEvent
     {"getValue"       (fn [self] (tget self :value))
-     "getTag"         (fn [self] (or (tget self :tag) java.util.Optional/empty))
+     "getTag"         (fn [self] (or (tget self :tag) (java.util.Optional/empty)))
      "getScalarStyle" (fn [self]
                         (let [s (tget self :style)]
                           ;; Return a simple object with toString matching SnakeYAML's ScalarStyle
@@ -224,11 +225,11 @@
   (__register-class-methods! :jolt.snakeyaml/AliasEvent
     {"getAlias" (fn [self] (tget self :alias))})
 
-  ;; CollectionStartEvent — getTag, isFlow
+  ;; getTag / isFlow on collection-start events (one registration per concrete class)
   (doseq [coll-tag [:jolt.snakeyaml/SequenceStartEvent
                     :jolt.snakeyaml/MappingStartEvent]]
     (__register-class-methods! coll-tag
-      {"getTag" (fn [self] (or (tget self :tag) java.util.Optional/empty))
+      {"getTag" (fn [self] (or (tget self :tag) (java.util.Optional/empty)))
        "isFlow" (fn [self] (tget self :flow))}))
   nil)
 
@@ -249,19 +250,45 @@
 
 (defn- register-load-settings! []
   ;; LoadSettings: .builder -> LoadSettingsBuilder, .build -> LoadSettings (inert)
-  (__register-class-statics! (fqn API "LoadSettings")
-    {"builder" (fn [] (tt :jolt.snakeyaml/LoadSettingsBuilder))})
+  ;; Register under BOTH FQN and short name so (LoadSettings/builder) resolves.
+  (let [fqn (fqn API "LoadSettings")
+        short "LoadSettings"]
+    (doseq [n [fqn short]]
+      (__register-class-statics! n
+        {"builder" (fn [] (tt :jolt.snakeyaml/LoadSettingsBuilder))})))
   (__register-class-methods! :jolt.snakeyaml/LoadSettingsBuilder
     {"build" (fn [self] (tt :jolt.snakeyaml/LoadSettings))})
   nil)
 
 (defn- register-parse! []
   ;; Parse ctor takes a LoadSettings, .parseString returns event iterable
-  (__register-class-ctor! (fqn LOW "Parse")
-    (fn [& args] (tt :jolt.snakeyaml/Parse)))
+  ;; Register under BOTH FQN and short name so (new Parse ...) or (Parse. ...) resolves.
+  (let [fqn (fqn LOW "Parse")
+        short "Parse"]
+    (doseq [n [fqn short]]
+      (__register-class-ctor! n
+        (fn [& args] (tt :jolt.snakeyaml/Parse)))))
   ;; .parseString returns a seq of events via our event pump
   (__register-class-methods! :jolt.snakeyaml/Parse
     {"parseString" (fn [self ^String s] (parse-string s))})
+  nil)
+
+(defn- intern-class-var!
+  "Create a var in the FQN namespace so chez-runtime-import finds it.
+  The var holds the FQN string, matching what (class event) returns from the htable :class field."
+  [fqn]
+  (let [ns-sym (symbol (subs fqn 0 (str/last-index-of fqn ".")))
+        name-sym (symbol (subs fqn (inc (str/last-index-of fqn "."))))
+        _ (create-ns ns-sym)]
+    (intern ns-sym name-sym fqn)))
+
+(defn- register-event-classes! []
+  (doseq [evt ["Event" "NodeEvent" "AliasEvent" "ScalarEvent"
+               "CollectionStartEvent" "SequenceStartEvent" "MappingStartEvent"
+               "SequenceEndEvent" "MappingEndEvent"
+               "DocumentStartEvent" "DocumentEndEvent"]]
+    (intern-class-var! (fqn EVT evt)))
+  (intern-class-var! (fqn EXC "Mark"))
   nil)
 
 (defn install!
@@ -271,6 +298,7 @@
   (register-event-methods!)
   (register-load-settings!)
   (register-parse!)
+  (register-event-classes!)
   nil)
 
 (install!)
