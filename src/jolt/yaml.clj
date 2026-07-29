@@ -80,6 +80,12 @@
     (ffi/free-event evt)
     [ctx val]))
 
+;; read-value dispatches to the two container readers, which in turn call back
+;; into it — mutual recursion, so the pair below it needs declaring first. A
+;; reference to a name that isn't interned yet is a compile error, in a nested
+;; body as much as at the top level.
+(declare read-sequence read-mapping)
+
 (defn- read-value [vstate ctx t evt]
   (case t
     6  (read-scalar ctx evt)         ;; SCALAR
@@ -130,7 +136,10 @@
                            [c' nil])]
             (if (and k v (not= k ::skip) (not= v ::skip))
               (recur (assoc pairs k v) c''')
-              (recur pairs c''))))
+              ;; skipping the pair still consumed both events, so carry the
+              ;; context from reading the VALUE (c'''), like the branch above —
+              ;; anything registered while reading it (an anchor) must survive.
+              (recur pairs c'''))))
         [ctx nil]))))
 
 ;; --- document pump -----------------------------------------------------------
@@ -215,6 +224,10 @@
   (if (needs-quoting? s)
     (str "'" (str/replace s "'" "''") "'")
     s))
+
+;; dump-seq/dump-map and dump-internal are mutually recursive: the container
+;; writers recurse through dump-internal, which dispatches back to them.
+(declare dump-internal)
 
 (defn- dump-seq [xs depth]
   (str/join "\n"

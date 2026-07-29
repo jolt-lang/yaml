@@ -10,4 +10,4 @@
  :aliases {:test {:extra-paths ["test"]
                   :main-opts ["-m" "jolt.yaml-test"]}}
 
- :tasks {test "joltc -M:test"}}
+ :tasks {test "jolt -M:test"}}
