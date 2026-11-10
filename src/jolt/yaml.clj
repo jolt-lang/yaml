@@ -12,6 +12,7 @@
   The dumper writes block-scalar YAML: strings quoted when ambiguous, nested
   collections indented two spaces. Numbers, booleans, and nil round-trip
   faithfully."
+  (:refer-clojure :exclude [load])
   (:require [jolt.yaml.ffi :as ffi]
             [clojure.string :as str]))
 
