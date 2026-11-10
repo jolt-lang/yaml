@@ -12,7 +12,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # libyaml is the parser jolt.yaml binds (:jolt/native "yaml" in deps.edn)
       - name: Install libyaml (Linux)
         if: runner.os == 'Linux'
@@ -24,7 +24,7 @@ jobs:
         run: brew list libyaml >/dev/null 2>&1 || brew install libyaml
       - id: jolt
         uses: jlt-commons/setup-jolt@v1.0.2
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.jolt/gitlibs
