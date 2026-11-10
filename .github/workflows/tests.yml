@@ -1,0 +1,35 @@
+name: tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      # libyaml is the parser jolt.yaml binds (:jolt/native "yaml" in deps.edn)
+      - name: Install libyaml (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liblz4-1 zlib1g libtinfo6 libyaml-0-2
+      - name: Install libyaml (macOS)
+        if: runner.os == 'macOS'
+        run: brew list libyaml >/dev/null 2>&1 || brew install libyaml
+      - id: jolt
+        uses: jlt-commons/setup-jolt@v1.0.2
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.jolt/gitlibs
+            ~/.jolt/mvnlibs
+            ~/.m2/repository
+          key: ${{ runner.os }}-jolt-${{ steps.jolt.outputs.version }}-${{ hashFiles('deps.edn') }}
+      - name: Test
+        run: JOLT_PWD="$PWD" jolt -M:test
