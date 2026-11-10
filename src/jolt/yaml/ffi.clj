@@ -27,6 +27,7 @@
     yaml_mark_t (24 bytes): index 0 line 8 column 16
 
   yaml_parser_t: 480 bytes (allocated on the heap, freed with yaml_parser_delete)."
+  (:refer-clojure :exclude [read])
   (:require [jolt.ffi :as ffi]))
 
 ;; Re-export jolt.ffi helpers so consumers only need one :require.
