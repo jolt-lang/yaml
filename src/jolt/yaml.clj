@@ -17,13 +17,16 @@
 
 ;; --- type coercion helpers ---------------------------------------------------
 
-(defn- infer-type [s]
+(defn- infer-type
+  "Resolve a PLAIN scalar the way clj-yaml does: an empty scalar and the null
+  spellings are nil, the true/false spellings booleans. Quoted and block
+  scalars are strings and never reach here."
+  [s]
   (cond
     (nil? s)              nil
-    (= s "true")          true
-    (= s "false")         false
-    (= s "~")             nil
-    (= s "null")          nil
+    (#{"" "~" "null" "Null" "NULL"} s) nil
+    (#{"true" "True" "TRUE"} s)    true
+    (#{"false" "False" "FALSE"} s) false
     (re-matches #"^-?\d+\.\d+(?:[eE][+-]?\d+)?$" s) (Double/parseDouble s)
     (re-matches #"^-?\d+$" s) (Long/parseLong s)
     :else                 s))
@@ -69,7 +72,9 @@
 
 (defn- read-scalar [ctx evt]
   (let [sv  (ffi/read-scalar evt)
-        val (infer-type (:value sv))
+        val (if (= (:style sv) ffi/YAML-PLAIN-SCALAR-STYLE)
+              (infer-type (:value sv))
+              (:value sv))
         anchor (:anchor sv)]
     (ffi/free-event evt)
     [(if anchor (assoc-in ctx [:anchors anchor] val) ctx) val]))
@@ -134,7 +139,9 @@
                 [c''' v] (if-let [[t2 e2] (next-event vstate)]
                            (read-value vstate c' t2 e2)
                            [c' nil])]
-            (if (and k v (not= k ::skip) (not= v ::skip))
+            ;; nil and false are values like any other: only the ::skip
+            ;; marker for a structural event drops the pair.
+            (if (and (not= k ::skip) (not= v ::skip))
               (recur (assoc pairs k v) c''')
               ;; skipping the pair still consumed both events, so carry the
               ;; context from reading the VALUE (c'''), like the branch above —
@@ -177,7 +184,8 @@
       7  (read-sequence vstate ctx nil evt)               ;; SEQ-START (shorthand)
       9  (read-mapping vstate ctx nil evt)                 ;; MAP-START (shorthand)
       (do (ffi/free-event evt) (recur vstate ctx)))
-    [ctx nil]))
+    ;; End of stream, distinct from a document whose value is nil.
+    [ctx ::eos]))
 
 ;; --- public API --------------------------------------------------------------
 
@@ -193,7 +201,7 @@
         ctx    {:anchors {} :opts (or opts {})}]
     (try
       (let [[_ val] (read-document vstate ctx)]
-        val)
+        (when-not (= val ::eos) val))
       (finally
         (destroy-parser! vstate)))))
 
@@ -206,58 +214,92 @@
       (loop [docs []
              c    ctx]
         (let [[c' val] (read-document vstate c)]
-          (if (nil? val)
+          (if (= val ::eos)
             docs
             (recur (conj docs val) c'))))
       (finally
         (destroy-parser! vstate)))))
 
 ;; --- pure-Clojure YAML dumper -----------------------------------------------
+;; Block style laid out as SnakeYAML (and so clj-yaml) does: a nested map is
+;; indented two spaces under its key, a sequence's dashes sit at its key's
+;; indentation, and a collection inside a sequence starts on the dash's line.
 
 (defn- needs-quoting? [s]
-  (or (re-find #"[\s:#\[\]{},&\*\?!\|>\-'\"%@`]" s)
-      (re-find #"^(true|false|null|yes|no|on|off|\d)" s)
-      (str/blank? s)
-      (= "" s)))
+  (or (= "" s)
+      (re-find #"[\s:#\[\]{},&\*\?!\|>\-'\"%@`~]" s)
+      (re-find #"(?i)^(true|false|null|yes|no|on|off)$" s)
+      (re-find #"^[\d.+]" s)))
+
+(defn- double-quote [s]
+  (str "\""
+       (-> s
+           (str/replace "\\" "\\\\")
+           (str/replace "\"" "\\\"")
+           (str/replace "\n" "\\n")
+           (str/replace "\r" "\\r")
+           (str/replace "\t" "\\t"))
+       "\""))
 
 (defn- quote-string [s]
-  (if (needs-quoting? s)
-    (str "'" (str/replace s "'" "''") "'")
-    s))
-
-;; dump-seq/dump-map and dump-internal are mutually recursive: the container
-;; writers recurse through dump-internal, which dispatches back to them.
-(declare dump-internal)
-
-(defn- dump-seq [xs depth]
-  (str/join "\n"
-            (for [x xs]
-              (str "- " (dump-internal x (inc depth) false)))))
-
-(defn- dump-map [m depth]
-  (let [indent (apply str (repeat (* depth 2) \space))]
-    (str/join "\n"
-              (for [[k v] m]
-                (str indent
-                     (dump-internal k (inc depth) true) ": "
-                     (dump-internal v (inc depth) true))))))
-
-(defn- dump-internal [x depth in-map?]
   (cond
-    (nil? x)               "~"
-    (instance? Boolean x)  (if x "true" "false")
-    (number? x)            (str x)
-    (keyword? x)           (str (name x))
-    (instance? String x)   (quote-string x)
-    (sequential? x)        (str "\n" (dump-seq x depth))
-    (map? x)               (str "\n" (dump-map x depth))
-    :else                  (quote-string (str x))))
+    ;; a line break or tab folds inside single quotes; escape them instead
+    (re-find #"[\n\r\t]" s) (double-quote s)
+    (needs-quoting? s)      (str "'" (str/replace s "'" "''") "'")
+    :else                   s))
+
+(defn- dump-scalar [x]
+  (cond
+    (nil? x)              "null"
+    (instance? Boolean x) (if x "true" "false")
+    (number? x)           (str x)
+    (keyword? x)          (quote-string (name x))
+    (string? x)           (quote-string x)
+    :else                 (quote-string (str x))))
+
+(defn- coll-node? [x] (or (map? x) (sequential? x)))
+
+(defn- empty-coll [x] (if (map? x) "{}" "[]"))
+
+(defn- spaces [n] (apply str (repeat n \space)))
+
+;; dump-lines renders x as a vector of lines at absolute indentation `indent`;
+;; the map and sequence writers recurse through it.
+(declare dump-lines)
+
+(defn- dump-map-lines [m indent]
+  (let [pad (spaces indent)]
+    (vec (mapcat (fn [[k v]]
+                   (let [head (str pad (dump-scalar k) ":")]
+                     (cond
+                       (and (coll-node? v) (empty? v)) [(str head " " (empty-coll v))]
+                       (map? v)        (into [head] (dump-lines v (+ indent 2)))
+                       (sequential? v) (into [head] (dump-lines v indent))
+                       :else           [(str head " " (dump-scalar v))])))
+                 m))))
+
+(defn- dump-seq-lines [xs indent]
+  (let [pad (spaces indent)]
+    (vec (mapcat (fn [x]
+                   (if (and (coll-node? x) (seq x))
+                     ;; render one level deeper, then put the dash on line one
+                     (let [[l1 & more] (dump-lines x (+ indent 2))]
+                       (into [(str pad "- " (subs l1 (+ indent 2)))] more))
+                     [(str pad "- " (if (coll-node? x) (empty-coll x) (dump-scalar x)))]))
+                 xs))))
+
+(defn- dump-lines [x indent]
+  (cond
+    (and (coll-node? x) (empty? x)) [(str (spaces indent) (empty-coll x))]
+    (map? x)        (dump-map-lines x indent)
+    (sequential? x) (dump-seq-lines x indent)
+    :else           [(str (spaces indent) (dump-scalar x))]))
 
 (defn dump
   "Serialize x to a YAML string (pure-Clojure, no C emitter).
   Strings are quoted when ambiguous. Collections are block-style with
-  two-space indentation."
+  two-space indentation. The result ends with a newline."
   [x]
-  (str/trim (dump-internal x 0 false)))
+  (str (str/join "\n" (dump-lines x 0)) "\n"))
 
 (def generate-string dump)

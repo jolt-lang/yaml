@@ -20,6 +20,7 @@
   (parse-string (slurp rdr)))
 
 (defn generate-string
-  "Serialize Clojure data to a YAML string."
-  [x]
+  "Serialize Clojure data to a YAML string. Takes clj-yaml's trailing options
+  so callers that pass them still run, but the output is always block style."
+  [x & _opts]
   (yaml/dump x))

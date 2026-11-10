@@ -23,6 +23,7 @@ SnakeYAML engine v2 surface for yamlscript compatibility.
 
 ;; Serialize Clojure data to YAML
 (yaml/dump {:a [1 2 3]})
+;; => "a:\n- 1\n- 2\n- 3\n"
 ```
 
 ### clj-yaml compat
@@ -69,7 +70,7 @@ as `libyaml-0.so.2`.
 ## Build and test
 
 ```sh
-joltc -M:test   # run the test suite
+jolt -M:test   # run the test suite
 ```
 
 ## deps.edn
